@@ -31,10 +31,49 @@ llm = init_chat_model("openai:gpt-4o-mini")
 def human_assistance(query: str) -> str:
     """
     Use this tool when you need human assistance or expert guidance.
-    This will interrupt the conversation and wait for human input.
+    This will save the interrupt state and exit for human review.
     """
-    # interrupt를 사용하여 외부에서 human input을 받을 수 있도록 함
-    return interrupt({"query": query, "tool_name": "human_assistance"})
+    import sys
+    import sqlite3
+    from datetime import datetime
+    
+    # interrupt 상태를 데이터베이스에 저장
+    try:
+        conn = sqlite3.connect('interrupt_state.db')
+        cursor = conn.cursor()
+        
+        # interrupt_state 테이블 생성 (없으면)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS interrupt_state (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id TEXT,
+                query TEXT,
+                tool_name TEXT,
+                timestamp TEXT,
+                status TEXT DEFAULT 'pending',
+                human_response TEXT
+            )
+        ''')
+        
+        # 현재 interrupt 상태 저장
+        cursor.execute('''
+            INSERT INTO interrupt_state (thread_id, query, tool_name, timestamp, status)
+            VALUES (?, ?, ?, ?, ?)
+        ''', ('default', query, 'human_assistance', datetime.now().isoformat(), 'pending'))
+        
+        conn.commit()
+        conn.close()
+        
+        print(f"\n🔄 인간 전문가의 검토가 필요합니다: {query}")
+        print("📋 interrupt 상태가 저장되었습니다.")
+        print("👤 human_input_handler.py를 실행하여 검토를 진행해주세요.")
+        print("🚪 메인 프로세스를 종료합니다...")
+        
+        # 프로세스 종료
+        sys.exit(0)
+        
+    except Exception as e:
+        return f"Error saving interrupt state: {str(e)}"
 
 tool = TavilySearch(max_results=5)
 tools = [tool, human_assistance]
@@ -116,6 +155,26 @@ class CustomToolNode:
                     # interrupt가 반환된 경우 그대로 전달
                     if isinstance(tool_result, Command):
                         return tool_result
+                    elif hasattr(tool_result, 'value'):  # Interrupt 객체 처리
+                        # Interrupt 객체에서 Command 추출
+                        interrupt_data = tool_result.value
+                        if isinstance(interrupt_data, dict):
+                            return Command(
+                                type="interrupt",
+                                data=interrupt_data,
+                                resumable=True
+                            )
+                    elif hasattr(tool_result, '__iter__') and len(tool_result) == 1:
+                        # Interrupt가 튜플로 반환되는 경우 처리
+                        interrupt_obj = tool_result[0]
+                        if hasattr(interrupt_obj, 'value'):
+                            interrupt_data = interrupt_obj.value
+                            if isinstance(interrupt_data, dict):
+                                return Command(
+                                    type="interrupt",
+                                    data=interrupt_data,
+                                    resumable=True
+                                )
                     
                     # 도구 결과를 메시지로 변환
                     tool_message = ToolMessage(
@@ -179,8 +238,15 @@ graph_builder.add_conditional_edges(
 graph_builder.add_edge(START, "chatbot")
 graph_builder.add_edge("tools", "chatbot")
 
-# SQLite 파일 저장소 설정
-memory = SqliteSaver.from_conn_string("file:./chatbot.db")  # 파일 DB 사용
+# SQLite 체크포인터 설정
+from langgraph.checkpoint.sqlite import SqliteSaver
+import sqlite3
+
+# SQLite 연결 (check_same_thread=False로 스레드 안전성 확보)
+# Note: check_same_thread=False is OK as the implementation uses a lock
+# to ensure thread safety.
+conn = sqlite3.connect("./chatbot.db", check_same_thread=False)
+memory = SqliteSaver(conn)
 
 graph = graph_builder.compile(checkpointer=memory)
 
