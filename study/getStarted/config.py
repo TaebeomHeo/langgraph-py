@@ -35,6 +35,10 @@ WORKSPACE_DIR = os.getenv("WORKSPACE_DIR", "./")
 DB_FILE = os.getenv("DB_FILE", "advanced_pattern.db")
 DB_PATH = os.path.join(WORKSPACE_DIR, DB_FILE)
 
+# Custom State 데이터베이스 파일
+CUSTOM_STATE_DB_FILE = os.getenv("CUSTOM_STATE_DB_FILE", "custom_state.db")
+CUSTOM_STATE_DB_PATH = os.path.join(WORKSPACE_DIR, CUSTOM_STATE_DB_FILE)
+
 # 스레드 추적 파일
 THREADS_FILE = os.getenv("THREADS_FILE", "active_threads.json")
 THREADS_PATH = os.path.join(WORKSPACE_DIR, THREADS_FILE)
