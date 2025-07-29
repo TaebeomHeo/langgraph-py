@@ -23,18 +23,18 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command, interrupt
 from langgraph.prebuilt import ToolNode, tools_condition
 import sqlite3
-from config import OLLAMA_BASE_URL, OLLAMA_MODEL, OPENAI_API_KEY, TAVILY_API_KEY
+import config
 
 class State(TypedDict):
     messages: Annotated[list, add_messages]
 
 # LLM 초기화
-if OPENAI_API_KEY:
-    llm = init_chat_model("openai:gpt-4o-mini")
-    print("🔑 OpenAI 모델을 사용합니다.")
+if config.OPENAI_API_KEY:
+    llm = init_chat_model(f"openai:{config.OPENAI_MODEL}")
+    print(f"🔑 OpenAI 모델을 사용합니다: {config.OPENAI_MODEL}")
 else:
-    llm = init_chat_model(model=OLLAMA_MODEL, model_provider="ollama", base_url=OLLAMA_BASE_URL)
-    print(f"🦙 Ollama 모델을 사용합니다: {OLLAMA_MODEL}")
+    llm = init_chat_model(model=config.OLLAMA_MODEL, model_provider="ollama", base_url=config.OLLAMA_BASE_URL)
+    print(f"🦙 Ollama 모델을 사용합니다: {config.OLLAMA_MODEL}")
 
 @tool
 def human_assistance(query: str) -> str:
@@ -42,7 +42,7 @@ def human_assistance(query: str) -> str:
     Human assistance 도구 - 실제 interrupt 발생
     """
     print(f"\n🤖 AI: {query}")
-    print("🔄 Human input이 필요합니다. 현재 스레드가 일시정지됩니다...")
+    print(config.INTERRUPT_MESSAGE)
     
     # TypeScript 패턴: interrupt가 여기서 발생하고 실행 중단
     value = interrupt({
@@ -56,8 +56,8 @@ def human_assistance(query: str) -> str:
     return f"전문가 조언: {value}"
 
 # 도구 설정
-if TAVILY_API_KEY:
-    tavily_search = TavilySearch(max_results=5)
+if config.TAVILY_API_KEY:
+    tavily_search = TavilySearch(max_results=config.TAVILY_MAX_RESULTS)
     tools = [tavily_search, human_assistance]
     print("🔍 Tavily 검색 도구가 활성화되었습니다.")
 else:
@@ -86,14 +86,14 @@ graph_builder.add_edge(START, "chatbot")
 graph_builder.add_edge("tools", "chatbot")
 
 # SQLite 체크포인터
-conn = sqlite3.connect("./advanced_pattern.db", check_same_thread=False)
+conn = sqlite3.connect(config.DB_PATH, check_same_thread=False)
 memory = SqliteSaver(conn)
 
 graph = graph_builder.compile(checkpointer=memory)
 
 def generate_thread_id() -> str:
     """새로운 스레드 ID 생성"""
-    return f"thread_{uuid.uuid4().hex[:8]}_{datetime.now().strftime('%H%M%S')}"
+    return f"{config.THREAD_ID_PREFIX}_{uuid.uuid4().hex[:config.THREAD_ID_LENGTH]}_{datetime.now().strftime('%H%M%S')}"
 
 # 전역 스레드 추적용
 _active_threads = set()
@@ -114,8 +114,8 @@ def get_all_thread_states() -> List[Dict]:
         for thread_id in list(_active_threads):
             try:
                 # 🎯 TypeScript 패턴: config에는 thread_id만
-                config = {"configurable": {"thread_id": thread_id}}
-                snapshot = graph.get_state(config)
+                thread_config = {"configurable": {"thread_id": thread_id}}
+                snapshot = graph.get_state(thread_config)
                 
                 # 스레드에 실제 상태가 있는지 확인
                 if not snapshot or not snapshot.values:
@@ -165,53 +165,146 @@ def get_pending_threads() -> List[Dict]:
 
 def show_thread_history(thread_id: str) -> None:
     """
-    특정 스레드의 히스토리 조회 - TypeScript 패턴 따라 간단하게
-    JavaScript 참조: printStateHistory() 함수
+    특정 스레드의 대화 히스토리 조회 - 실제 대화 내용 중심
     """
     try:
-        config = {"configurable": {"thread_id": thread_id}}
+        thread_config = {"configurable": {"thread_id": thread_id}}
         
-        print(f"\n=== State History for {thread_id} ===")
+        print(f"\n=== 💬 Thread History: {thread_id} ===")
         
-        # 🎯 TypeScript 패턴: 간단한 getStateHistory 사용
-        history_count = 0
-        for snapshot in graph.get_state_history(config):
-            history_count += 1
-            if history_count > 8:  # 최대 8개만 표시
-                break
+        # 모든 snapshot을 리스트로 수집 후 역순으로 정렬 (최신이 아래에)
+        snapshots = list(graph.get_state_history(thread_config))
+        if not snapshots:
+            print("📭 No conversation history found.")
+            return
+        
+        # 이전 메시지 수를 추적하여 새로운 메시지만 출력
+        prev_message_count = 0
+        step_count = 0
+        
+        for snapshot in reversed(snapshots):  # 시간순으로 출력
+            if not snapshot.values:
+                continue
                 
-            # TypeScript 패턴: 간단한 정보 표시  
-            timestamp = str(snapshot.created_at) if snapshot.created_at else "No timestamp"
-            next_node = snapshot.next[0] if snapshot.next else "END"
+            messages = snapshot.values.get("messages", [])
+            current_count = len(messages)
             
-            print(f"Timestamp: {timestamp}")
-            print(f"Next Node: {next_node}")
-            
-            # 상태 간단히 표시
-            if snapshot.values:
-                messages = snapshot.values.get("messages", [])
-                print(f"Messages: {len(messages)}")
+            # 새로운 메시지가 추가된 경우에만 출력
+            if current_count > prev_message_count:
+                step_count += 1
                 
-                # 마지막 메시지만 간단히
-                if messages:
-                    last_msg = messages[-1]
-                    content = getattr(last_msg, 'content', 'No content')
-                    if len(content) > 50:
-                        content = content[:50] + "..."
-                    print(f"Last: {content}")
-            
-            print("-------------------\n")
-            
-        if history_count == 0:
-            print("No history available.")
+                # 시간 정보 (간단히)
+                if snapshot.created_at:
+                    time_str = str(snapshot.created_at)[:19].replace('T', ' ')
+                    print(f"\n--- Step {step_count} ({time_str}) ---")
+                else:
+                    print(f"\n--- Step {step_count} ---")
+                
+                # 새로 추가된 메시지들만 출력
+                new_messages = messages[prev_message_count:]
+                for msg in new_messages:
+                    if hasattr(msg, 'content') and msg.content:
+                        content = msg.content.strip()
+                        if not content:
+                            continue
+                            
+                        # 메시지 타입에 따라 출력
+                        if hasattr(msg, '__class__'):
+                            msg_type = msg.__class__.__name__
+                            if msg_type == 'HumanMessage':
+                                print(f"👤 User: {content}")
+                            elif msg_type == 'AIMessage':
+                                # tool_calls가 있는 경우 (도구 호출)
+                                if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                                    tools = [tc.get('name', 'unknown') for tc in msg.tool_calls]
+                                    print(f"🔧 AI: [도구 호출: {', '.join(tools)}]")
+                                else:
+                                    # 일반 AI 응답
+                                    if len(content) > config.MESSAGE_PREVIEW_LENGTH * 4:  # 더 긴 미리보기
+                                        content = content[:config.MESSAGE_PREVIEW_LENGTH * 4] + "..."
+                                    print(f"🤖 AI: {content}")
+                            elif msg_type == 'ToolMessage':
+                                # 도구 실행 결과는 간단히
+                                if hasattr(msg, 'name'):
+                                    tool_name = msg.name
+                                    preview = content[:config.MESSAGE_PREVIEW_LENGTH] + "..." if len(content) > config.MESSAGE_PREVIEW_LENGTH else content
+                                    print(f"🔍 {tool_name}: {preview}")
+                
+                prev_message_count = current_count
         
-        print("===================")
+        # 현재 상태 표시
+        final_snapshot = snapshots[0]  # 가장 최신
+        if final_snapshot.next:
+            print(f"\n📋 Current Status: Pending (waiting for: {final_snapshot.next[0]})")
+        else:
+            print(f"\n✅ Thread Status: Complete")
+        
+        print("=" * 50)
         
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"❌ Error reading history: {e}")
+
+def get_thread_context(thread_id: str) -> Dict:
+    """스레드의 인간 검토 맥락 정보 추출"""
+    try:
+        thread_config = {"configurable": {"thread_id": thread_id}}
+        snapshot = graph.get_state(thread_config)
+        
+        if not snapshot.values:
+            return {"user_question": "No context", "ai_request": "No context", "summary": "No context"}
+        
+        messages = snapshot.values.get("messages", [])
+        if not messages:
+            return {"user_question": "No messages", "ai_request": "No messages", "summary": "No messages"}
+        
+        # 최근 사용자 질문 찾기
+        user_question = "No user question found"
+        ai_request = "No AI request found"
+        
+        # 뒤에서부터 찾기 (최신부터)
+        for msg in reversed(messages):
+            if hasattr(msg, '__class__'):
+                msg_type = msg.__class__.__name__
+                content = getattr(msg, 'content', '')
+                
+                # 사용자의 마지막 질문
+                if msg_type == 'HumanMessage' and user_question == "No user question found":
+                    user_question = content[:100] + "..." if len(content) > 100 else content
+                
+                # AI의 human_assistance 도구 호출 찾기
+                elif msg_type == 'AIMessage' and hasattr(msg, 'tool_calls') and msg.tool_calls:
+                    for tool_call in msg.tool_calls:
+                        if tool_call.get('name') == 'human_assistance':
+                            args = tool_call.get('args', {})
+                            query = args.get('query', 'No query specified')
+                            ai_request = query[:150] + "..." if len(query) > 150 else query
+                            break
+        
+        # 대화 요약 (최근 3개 메시지)
+        recent_messages = messages[-3:] if len(messages) >= 3 else messages
+        summary_parts = []
+        for msg in recent_messages:
+            if hasattr(msg, '__class__'):
+                msg_type = msg.__class__.__name__
+                content = getattr(msg, 'content', '')[:50]
+                if msg_type == 'HumanMessage':
+                    summary_parts.append(f"👤{content}")
+                elif msg_type == 'AIMessage' and not hasattr(msg, 'tool_calls'):
+                    summary_parts.append(f"🤖{content}")
+        
+        summary = " → ".join(summary_parts) if summary_parts else "No conversation summary"
+        
+        return {
+            "user_question": user_question,
+            "ai_request": ai_request, 
+            "summary": summary
+        }
+        
+    except Exception as e:
+        return {"user_question": f"Error: {e}", "ai_request": f"Error: {e}", "summary": f"Error: {e}"}
 
 def select_thread_interactive() -> Optional[str]:
-    """인터랙티브 스레드 선택 - TypeScript 패턴으로 간단하게"""
+    """인터랙티브 스레드 선택 - 인간 검토 맥락과 함께"""
     global _active_threads
     
     pending_threads = get_pending_threads()
@@ -220,15 +313,19 @@ def select_thread_interactive() -> Optional[str]:
         print("No pending threads.")
         return None
     
-    print(f"\nPending Threads ({len(pending_threads)}):")
-    print("=" * 50)
+    print(f"\n🔍 Pending Threads ({len(pending_threads)}):")
+    print("=" * 70)
     
     for i, thread in enumerate(pending_threads, 1):
-        print(f"{i}. {thread['thread_id']}")
-        print(f"   Next: {thread['next_node']}")
-        print(f"   Messages: {thread['message_count']}")
-        print(f"   Last: {thread['last_message']}")
-        print("-" * 30)
+        context = get_thread_context(thread['thread_id'])
+        
+        print(f"{i}. 📧 {thread['thread_id']}")
+        print(f"   📋 Status: Waiting for {thread['next_node']}")
+        print(f"   📊 Messages: {thread['message_count']}")
+        print(f"   👤 User Question: {context['user_question']}")
+        print(f"   🤖 AI Needs Help: {context['ai_request']}")
+        print(f"   💬 Recent: {context['summary']}")
+        print("-" * 70)
     
     while True:
         try:
@@ -266,7 +363,7 @@ def resume_thread(thread_id: str, user_input: str) -> bool:
     global _active_threads
     
     try:
-        config = {"configurable": {"thread_id": thread_id}}
+        thread_config = {"configurable": {"thread_id": thread_id}}
         
         # 스레드를 활성 목록에 추가하고 저장
         _active_threads.add(thread_id)
@@ -278,7 +375,7 @@ def resume_thread(thread_id: str, user_input: str) -> bool:
         # Command로 재개
         for chunk in graph.stream(
             Command(resume=user_input),
-            config
+            thread_config
         ):
             for node_name, node_output in chunk.items():
                 if node_name == "chatbot" and "messages" in node_output:
@@ -296,7 +393,7 @@ def resume_thread(thread_id: str, user_input: str) -> bool:
                     tool_messages = node_output["messages"]
                     for tool_msg in tool_messages:
                         if hasattr(tool_msg, 'content'):
-                            print(f"🔍 도구 결과: {tool_msg.content[:500]}...")
+                            print(f"🔍 도구 결과: {tool_msg.content[:config.SEARCH_RESULT_PREVIEW_LENGTH]}...")
                     
         return True
         
@@ -309,7 +406,7 @@ def start_new_conversation(user_input: str) -> str:
     global _active_threads
     
     thread_id = generate_thread_id()
-    config = {"configurable": {"thread_id": thread_id}}
+    thread_config = {"configurable": {"thread_id": thread_id}}
     
     # 새 스레드를 활성 목록에 추가하고 저장
     _active_threads.add(thread_id)
@@ -320,9 +417,10 @@ def start_new_conversation(user_input: str) -> str:
     try:
         for chunk in graph.stream(
             {"messages": [HumanMessage(content=user_input)]},
-            config
+            thread_config
         ):
-            # print(f"📦 Debug - Chunk: {chunk}")  # 디버깅용
+            if config.SHOW_CHUNK_DEBUG:
+                print(f"📦 [NEW] Debug - Chunk: {chunk}")
             
             for node_name, node_output in chunk.items():
                 if node_name == "chatbot" and "messages" in node_output:
@@ -340,7 +438,7 @@ def start_new_conversation(user_input: str) -> str:
                     tool_messages = node_output["messages"]
                     for tool_msg in tool_messages:
                         if hasattr(tool_msg, 'content'):
-                            print(f"🔍 검색 결과: {tool_msg.content[:500]}...")  # 처음 500자만
+                            print(f"🔍 검색 결과: {tool_msg.content[:config.SEARCH_RESULT_PREVIEW_LENGTH]}...")
                     
     except Exception as e:
         if "interrupt" in str(e).lower():
@@ -361,8 +459,8 @@ def start_new_conversation(user_input: str) -> str:
 def is_thread_pending(thread_id: str) -> bool:
     """스레드가 pending 상태인지 확인"""
     try:
-        config = {"configurable": {"thread_id": thread_id}}
-        snapshot = graph.get_state(config)
+        thread_config = {"configurable": {"thread_id": thread_id}}
+        snapshot = graph.get_state(thread_config)
         
         if snapshot and hasattr(snapshot, 'next') and snapshot.next:
             # next가 있으면 pending 상태
@@ -380,14 +478,15 @@ def continue_conversation(user_input: str, thread_id: str) -> str:
         print("💡 'select' 명령어로 재개하거나 새 스레드에서 시작하세요.")
         return None
     
-    config = {"configurable": {"thread_id": thread_id}}
+    thread_config = {"configurable": {"thread_id": thread_id}}
     
     try:
         for chunk in graph.stream(
             {"messages": [HumanMessage(content=user_input)]},
-            config
+            thread_config
         ):
-            # print(f"📦 Debug - Chunk: {chunk}")  # 디버깅용
+            if config.SHOW_CHUNK_DEBUG:
+                print(f"📦 [CONTINUE] Debug - Chunk: {chunk}")
             
             for node_name, node_output in chunk.items():
                 if node_name == "chatbot" and "messages" in node_output:
@@ -405,7 +504,7 @@ def continue_conversation(user_input: str, thread_id: str) -> str:
                     tool_messages = node_output["messages"]
                     for tool_msg in tool_messages:
                         if hasattr(tool_msg, 'content'):
-                            print(f"🔍 검색 결과: {tool_msg.content[:500]}...")
+                            print(f"🔍 검색 결과: {tool_msg.content[:config.SEARCH_RESULT_PREVIEW_LENGTH]}...")
                     
     except Exception as e:
         if "interrupt" in str(e).lower():
@@ -433,7 +532,7 @@ def discover_existing_threads():
         import json
         
         # 스레드 추적 파일 경로
-        threads_file = "./active_threads.json"
+        threads_file = config.THREADS_PATH
         
         if os.path.exists(threads_file):
             print("📁 기존 스레드 추적 파일 발견.")
@@ -445,8 +544,8 @@ def discover_existing_threads():
                 valid_threads = set()
                 for thread_id in saved_threads:
                     try:
-                        config = {"configurable": {"thread_id": thread_id}}
-                        snapshot = graph.get_state(config)
+                        thread_config = {"configurable": {"thread_id": thread_id}}
+                        snapshot = graph.get_state(thread_config)
                         if snapshot and snapshot.values:  # 실제 상태가 있으면 유효
                             valid_threads.add(thread_id)
                     except:
@@ -475,7 +574,7 @@ def save_active_threads():
     
     try:
         import json
-        with open("./active_threads.json", 'w') as f:
+        with open(config.THREADS_PATH, 'w') as f:
             json.dump(list(_active_threads), f)
     except Exception as e:
         pass  # 저장 실패는 치명적이지 않음
@@ -496,18 +595,24 @@ def clear_all_threads():
         _active_threads.clear()
         
         # 스레드 추적 파일 삭제
-        threads_file = "./active_threads.json"
-        if os.path.exists(threads_file):
-            os.remove(threads_file)
+        if os.path.exists(config.THREADS_PATH):
+            os.remove(config.THREADS_PATH)
         
-        # SQLite 체크포인터 파일 삭제 (선택사항)
-        db_files = ["chatbot.db", "memory.db"]
+        # 메인 데이터베이스 파일 삭제
         deleted_db_files = []
-        for db_file in db_files:
-            if os.path.exists(db_file):
+        if os.path.exists(config.DB_PATH):
+            try:
+                os.remove(config.DB_PATH)
+                deleted_db_files.append(os.path.basename(config.DB_PATH))
+            except:
+                pass  # 삭제 실패는 무시
+        
+        # 추가 DB 파일들 삭제 (설정된 경우에만)
+        for db_path in config.ADDITIONAL_DB_PATHS:
+            if os.path.exists(db_path):
                 try:
-                    os.remove(db_file)
-                    deleted_db_files.append(db_file)
+                    os.remove(db_path)
+                    deleted_db_files.append(os.path.basename(db_path))
                 except:
                     pass  # 삭제 실패는 무시
         
@@ -529,7 +634,7 @@ def main():
     print("-" * 70)
     
     # API 키 상태 확인
-    if not TAVILY_API_KEY:
+    if not config.TAVILY_API_KEY:
         print("⚠️ 경고: TAVILY_API_KEY가 설정되지 않았습니다.")
         print("   검색 기능을 사용하려면 .env 파일에 TAVILY_API_KEY를 설정하세요.")
         print("   현재는 human_assistance 도구만 사용 가능합니다.")
@@ -634,7 +739,7 @@ def main():
                         result = continue_conversation(user_input, _current_thread)
                         if result is None:
                             # pending 스레드이거나 interrupt 발생 - 새 스레드에서 시작
-                            print("🆕 새로운 스레드에서 메시지를 처리합니다...")
+                            print(config.NEW_THREAD_MESSAGE)
                             _current_thread = start_new_conversation(user_input)
                             print(f"📍 현재 스레드: {_current_thread}")
                         else:
