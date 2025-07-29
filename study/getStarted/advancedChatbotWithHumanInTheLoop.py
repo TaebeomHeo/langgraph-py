@@ -347,13 +347,39 @@ def start_new_conversation(user_input: str) -> str:
             print(f"🔄 Thread '{thread_id}'에서 interrupt 발생!")
             print("📋 이 스레드는 pending 상태가 되었습니다.")
             print("💡 'select' 명령어로 나중에 재개할 수 있습니다.")
+            
+            # 현재 스레드 비활성화
+            global _current_thread
+            if _current_thread == thread_id:
+                _current_thread = None
+                
         else:
             print(f"❌ 오류: {e}")
             
     return thread_id
 
+def is_thread_pending(thread_id: str) -> bool:
+    """스레드가 pending 상태인지 확인"""
+    try:
+        config = {"configurable": {"thread_id": thread_id}}
+        snapshot = graph.get_state(config)
+        
+        if snapshot and hasattr(snapshot, 'next') and snapshot.next:
+            # next가 있으면 pending 상태
+            return True
+        return False
+    except:
+        return False
+
 def continue_conversation(user_input: str, thread_id: str) -> str:
     """기존 스레드에서 대화 계속하기"""
+    
+    # 먼저 스레드가 pending 상태인지 확인
+    if is_thread_pending(thread_id):
+        print(f"⚠️ Thread '{thread_id}'는 pending 상태입니다.")
+        print("💡 'select' 명령어로 재개하거나 새 스레드에서 시작하세요.")
+        return None
+    
     config = {"configurable": {"thread_id": thread_id}}
     
     try:
@@ -386,6 +412,12 @@ def continue_conversation(user_input: str, thread_id: str) -> str:
             print(f"🔄 Thread '{thread_id}'에서 interrupt 발생!")
             print("📋 이 스레드는 pending 상태가 되었습니다.")
             print("💡 'select' 명령어로 나중에 재개할 수 있습니다.")
+            
+            # 현재 스레드 비활성화
+            global _current_thread
+            if _current_thread == thread_id:
+                _current_thread = None
+                
             return None  # interrupt 발생 시 현재 스레드 비활성화
         else:
             print(f"❌ 오류: {e}")
@@ -601,9 +633,10 @@ def main():
                         # 기존 스레드에서 대화 계속
                         result = continue_conversation(user_input, _current_thread)
                         if result is None:
-                            # interrupt 발생 - 현재 스레드 비활성화
-                            _current_thread = None
-                            print("💭 다음 메시지는 새로운 스레드에서 시작됩니다.")
+                            # pending 스레드이거나 interrupt 발생 - 새 스레드에서 시작
+                            print("🆕 새로운 스레드에서 메시지를 처리합니다...")
+                            _current_thread = start_new_conversation(user_input)
+                            print(f"📍 현재 스레드: {_current_thread}")
                         else:
                             print(f"📍 현재 스레드: {_current_thread}")
                     else:
